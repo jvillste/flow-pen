@@ -36,39 +36,27 @@
            [com.jogamp.common.nio Buffers]
            [jpen.event PenListener]
            [javax.swing JFrame JButton SwingUtilities]
+           [jpen.owner.multiAwt AwtPenToolkit]
            [jpen PButtonEvent PenManager PKindEvent PLevelEvent PScrollEvent PLevel PLevel$Type]))
 
 
 (defn pen-event-listener [pen-event-channel]
-  (let [values (atom {})]
-    (proxy [PenListener] []
-      #_(penLevelEvent [^PLevelEvent p-level-event]
-          (swap! values (fn [values]
-                          (reduce (fn [values level]
-                                    (let [key (condp = (.getType level) 
-                                                PLevel$Type/X :x
-                                                PLevel$Type/Y :y
-                                                PLevel$Type/PRESSURE :p
-                                                (.getType level))]
-                                      (assoc values key (.value level))))
-                                  values
-                                  (.levels p-level-event))))
-          (async/put! pen-event-channel @values))
-      (penLevelEvent [^PLevelEvent p-level-event]
-        (async/put! pen-event-channel
-                    (reduce (fn [values level]
-                              (let [key (condp = (.getType level) 
-                                          PLevel$Type/X :x
-                                          PLevel$Type/Y :y
-                                          PLevel$Type/PRESSURE :p
-                                          (.getType level))]
-                                (assoc values key (.value level))))
-                            {}
-                            (.levels p-level-event))))
-      (penButtonEvent [p-level-event])
-      (penKindEvent [p-level-event])
-      (penScrollEvent [p-level-event])
-      (penTock [millis]))))
+  (proxy [PenListener] []
+    (penLevelEvent [^PLevelEvent event]
+      (async/>!! pen-event-channel
+                 (reduce (fn [values level]
+                           (let [key (condp = (.getType level) 
+                                       PLevel$Type/X :x
+                                       PLevel$Type/Y :y
+                                       PLevel$Type/PRESSURE :p
+                                       (.getType level))]
+                             (assoc values key (.value level))))
+                         {}
+                         (.levels event))))
+    (penButtonEvent [event])
+    (penKindEvent [event])
+    (penScrollEvent [event])
+    (penTock [millis])))
 
 
 
@@ -128,6 +116,7 @@
   uniform sampler2D texture;
   uniform float x;
   uniform float y;
+  uniform float p;
 
   out vec4 outColor;
 
@@ -136,70 +125,34 @@
   
   float texture_x = int(texture_coordinate.x * 400.0);
   float texture_y = int((1 - texture_coordinate.y) * 400.0);
-  
-  if(texture_x == int(x) && texture_y == int(y))
-  {
-  outColor = vec4(1.0 , color.g, color.b, 1.0);
-  //outColor = vec4(1.0, 1.0, 1.0, 1.0);
-  } else {
-  outColor = vec4(color.r , color.g, color.b, 1.0);;
 
+  float distance = sqrt((texture_x - x)*(texture_x - x) + (texture_y - y)*(texture_y - y));
+  
+
+  vec4 paint_color = vec4(0.0, 1.0, 0.0, 1.0);
+
+  int radius = int(20.0 * p) + 3;
+  int feather = 4;
+
+  if(distance < radius - feather)
+  {
+
+  outColor = p*paint_color + (1-p) * color;
+
+  } else if(distance < radius) {
+
+  float ratio = (1 - (distance - (radius - feather)) / feather)*p;
+  outColor = ratio * paint_color + (1 - ratio) * color;
+
+  }else{
+
+  outColor = vec4(color.r , color.g, color.b, 1.0);;
 
   }
 
-
-  //outColor = vec4(x/400.0, 0, 0, 1);
-
-  //outColor = vec4(texture_coordinate.x, 0, 0, 1);
   }
 
 ")
-
-(defn create-paint [pen-event-channel]
-  (fn [view-context]
-    (async/go-loop []
-      (let [pen-states (csp/drain pen-event-channel nil)]
-        (if pen-states
-          (do (let [pen-state (last pen-states)]
-                (gui/with-gl view-context (fn [gpu-state]
-                                            (let [gl (:gl gpu-state)
-                                                  width 400
-                                                  height 400
-                                                  render-target-1 (or (:paint-render-target-1 gpu-state)
-                                                                      (render-target/create width height gl))
-                                                  
-                                                  render-target-2 (or (:paint-render-target-2 gpu-state)
-                                                                      (render-target/create width height gl))
-
-                                                  gpu-state (render-target/render-to render-target-2 gl
-                                                                                     (opengl/clear gl 0 0 0 255)
-                                                                                     (-> (assoc gpu-state :drawables [(drawable/->Quad ["texture" (:texture render-target-1)]
-                                                                                                                                       [:1f "resolution" width
-                                                                                                                                        :1f "x" (:x pen-state)
-                                                                                                                                        :1f "y" (:y pen-state)]
-                                                                                                                                       paint-fragment-shader-source
-                                                                                                                                       0 0 width height)])
-                                                                                         (gui/render-drawables)))]
-
-                                              (assoc gpu-state
-                                                     :paint-render-target-1 render-target-2
-                                                     :paint-render-target-2 render-target-1)))))
-              
-              (gui/apply-to-state view-context assoc :pen-state (last pen-states))
-              (recur)))))
-
-    {:local-state {:pen-state {}}
-     :view #'paint-view}))
-
-
-(defn start-2 []
-  (.start (Thread. (fn []
-                     (let [pen-event-channel (async/chan 100)]
-                       (gui/start-control (create-paint pen-event-channel)
-                                          (fn [canvas]
-                                            (let [pen-manager (new PenManager canvas)]
-                                              (.. pen-manager pen (addListener (pen-event-listener pen-event-channel)))))))))))
-
 
 
 (defn render-pen-state [gpu-state window pen-state]
@@ -221,7 +174,8 @@
                                               [(drawable/->Quad ["texture" (:texture render-target-1)]
                                                                 [:1f "resolution" width
                                                                  :1f "x" (:x pen-state)
-                                                                 :1f "y" (:y pen-state)]
+                                                                 :1f "y" (:y pen-state)
+                                                                 :1f "p" (:p pen-state)]
                                                                 paint-fragment-shader-source
                                                                 0 0 width height)]
                                               gl
@@ -253,10 +207,9 @@
                                    :close-automatically true
                                    :use-awt true
                                    :awt-init (fn [canvas]
-                                               (let [pen-manager (new PenManager canvas)]
-                                                 (.. pen-manager pen (addListener (pen-event-listener pen-event-channel))))))]
-    (println "window created")
-    (async/go-loop [pen-state {}]
+                                               (AwtPenToolkit/addPenListener canvas (pen-event-listener pen-event-channel))))]
+
+    (async/go-loop [pen-state {:p 0}]
       (let [levels (async/<! pen-event-channel)
             pen-state (conj pen-state levels)]
         (async/>! pen-state-channel pen-state)
@@ -268,7 +221,6 @@
                                       (renderer/create-quad-view-renderer gl)])
                         :texture (window/with-gl window gl
                                    (texture/create-for-file "pumpkin.png" gl))}]
-        (println "loop")
         (let [pen-states #_(async/<!! pen-state-channel) (csp/drain pen-state-channel nil)]
           (if pen-states
             (let [gpu-state (render-pen-state gpu-state window (last pen-states))] 
@@ -289,6 +241,22 @@
                        (trace/with-trace
                          (event-loop)))))
 
-  (.start (Thread. event-loop)))
+  (.start (Thread. event-loop))
+
+  #_(let [frame (javax.swing.JFrame.)]
+      (let [label (javax.swing.JLabel. "Haa")]
+        (let [pen-manager (new PenManager label)]
+          #_(-> pen-manager
+                (.getDevice 1)
+                (.setEnabled false))
+          (println (jpen.demo.StatusReport. pen-manager))
+          (.. pen-manager pen (addListener #_(JPenExample.) #_(FlowPenListener.) #_(listener/pen-event-listener (async/chan 100)))))
+        (.add (.getContentPane frame) label)
+        (doto frame
+          #_(.addWindowListener (proxy [java.awt.event.WindowAdapter] []
+                                  (windowClosing [event]
+                                    (.dispose frame))))
+          (.setSize 100 100)
+          (.setVisible true)))))
 
 
