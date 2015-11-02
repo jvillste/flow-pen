@@ -141,7 +141,52 @@
 
   } else if(distance < radius) {
 
-  float ratio = (1 - (distance - (radius - feather)) / feather)*p;
+  float ratio = (1 - (distance - (radius - feather)) / feather) * p;
+  outColor = ratio * paint_color + (1 - ratio) * color;
+
+  }else{
+  //discard;
+  outColor = vec4(color.r , color.g, color.b, 1.0);;
+
+  }
+
+  }
+
+")
+
+  (def stroke-fragment-shader-source "
+  #version 140
+
+  in vec2 texture_coordinate;
+
+  uniform isampler1D pen_states;
+
+  out vec4 outColor;
+
+  void main() {
+  vec4 color = texture(texture, texture_coordinate);
+  
+  float texture_x = int(texture_coordinate.x * 400.0);
+  float texture_y = int((1 - texture_coordinate.y) * 400.0);
+
+  int x = texture1d(pen_states,0);
+  int y = texture1d(pen_states,1);
+  float p = texture1d(pen_states, 2) / 1024;
+  float distance = sqrt((texture_x - x) * (texture_x - x) + (texture_y - y)*(texture_y - y));
+  
+  vec4 paint_color = vec4(0.0, 1.0, 0.0, 1.0);
+
+  int radius = int(20.0 * p) + 3;
+  int feather = 4;
+
+  if(distance < radius - feather)
+  {
+
+  outColor = p*paint_color + (1-p) * color;
+
+  } else if(distance < radius) {
+
+  float ratio = (1 - (distance - (radius - feather)) / feather) * p;
   outColor = ratio * paint_color + (1 - ratio) * color;
 
   }else{
@@ -154,48 +199,86 @@
 
 ")
 
+#_(defn render-stroke [gpu-state gl pen-states]
+  (let [width 400
+        height 400
 
-(defn render-pen-state [gpu-state window pen-state]
-  (window/with-gl window gl
-    (let [width 400
-          height 400
-          render-target-1 (or (:paint-render-target-1 gpu-state)
-                              (render-target/create width height gl))
-          
-          render-target-2 (or (:paint-render-target-2 gpu-state)
-                              (render-target/create width height gl))
+        pen-states-texture (or (:stroke-pen-states-texture gpu-state)
+                               (texture/create-texture-object gl))
 
-          ;;_ (println (:x pen-state) (:y pen-state))
+        _ (texture/load-1d-int gl pen-states-texture 9 [10 10 500
+                                                        100 100 1024
+                                                        10 100 500])
+        
+        renderers (renderer/map-for-renderers renderer/start-frame gl (:renderers gpu-state))
+        renderers (render-target/render-to render-target-2 gl
+                                           (renderer/render-frame-drawables
+                                            [(drawable/->Quad ["texture" (:texture render-target-1)]
+                                                              [:1f "resolution" width
+                                                               :1f "x" (:x pen-state)
+                                                               :1f "y" (:y pen-state)
+                                                               :1f "p" (:p pen-state)]
+                                                              paint-fragment-shader-source
+                                                              0 0 width height)]
+                                            gl
+                                            renderers))
+        _ (opengl/clear gl 0 0 0 1)
+        renderers (renderer/render-frame-drawables
+                   [(drawable/->Quad ["pen_states" ]
+                                     []
+                                     quad/fragment-shader-source
+                                     0 0 400 400)
+                    (assoc (text (str "x: " (:x pen-state)))
+                           :x 0 :y 0 :width 100 :height 100)]
+                   gl renderers)
+        
+        renderers (renderer/map-for-renderers renderer/end-frame gl renderers)]
 
-          renderers (renderer/map-for-renderers renderer/start-frame gl (:renderers gpu-state))
-          renderers (render-target/render-to render-target-2 gl
-                                             #_(opengl/clear gl 0 255 0 255)
-                                             (renderer/render-frame-drawables
-                                              [(drawable/->Quad ["texture" (:texture render-target-1)]
-                                                                [:1f "resolution" width
-                                                                 :1f "x" (:x pen-state)
-                                                                 :1f "y" (:y pen-state)
-                                                                 :1f "p" (:p pen-state)]
-                                                                paint-fragment-shader-source
-                                                                0 0 width height)]
-                                              gl
-                                              renderers))
-          _ (opengl/clear gl 0 0 0 1)
-          renderers (renderer/render-frame-drawables
-                     [(drawable/->Quad ["texture" #_(:texture gpu-state) (:texture render-target-2)]
-                                       []
-                                       quad/fragment-shader-source
-                                       0 0 400 400)
-                      (assoc (text (str "x: " (:x pen-state)))
-                             :x 0 :y 0 :width 100 :height 100)]
-                     gl renderers)
-          
-          renderers (renderer/map-for-renderers renderer/end-frame gl renderers)]
+    (assoc gpu-state
+           :renderers renderers
+           :paint-render-target-1 render-target-2
+           :paint-render-target-2 render-target-1)))
 
-      (assoc gpu-state
-             :renderers renderers
-             :paint-render-target-1 render-target-2
-             :paint-render-target-2 render-target-1))))
+(defn render-pen-state [gpu-state gl pen-state]
+  (let [width 400
+        height 400
+        render-target-1 (or (:paint-render-target-1 gpu-state)
+                            (render-target/create width height gl))
+        
+        render-target-2 (or (:paint-render-target-2 gpu-state)
+                            (render-target/create width height gl))
+
+        ;;_ (println (:x pen-state) (:y pen-state))
+
+        renderers (renderer/map-for-renderers renderer/start-frame gl (:renderers gpu-state))
+        renderers (render-target/render-to render-target-2 gl
+                                           #_(opengl/clear gl 0 255 0 255)
+                                           (renderer/render-frame-drawables
+                                            [(drawable/->Quad ["texture" (:texture render-target-1)]
+                                                              [:1f "resolution" width
+                                                               :1f "x" (:x pen-state)
+                                                               :1f "y" (:y pen-state)
+                                                               :1f "p" (:p pen-state)]
+                                                              paint-fragment-shader-source
+                                                              0 0 width height)]
+                                            gl
+                                            renderers))
+        _ (opengl/clear gl 0 0 0 1)
+        renderers (renderer/render-frame-drawables
+                   [(drawable/->Quad ["texture" #_(:texture gpu-state) (:texture render-target-2)]
+                                     []
+                                     quad/fragment-shader-source
+                                     0 0 400 400)
+                    (assoc (text (str "x: " (:x pen-state)))
+                           :x 0 :y 0 :width 100 :height 100)]
+                   gl renderers)
+        
+        renderers (renderer/map-for-renderers renderer/end-frame gl renderers)]
+
+    (assoc gpu-state
+           :renderers renderers
+           :paint-render-target-1 render-target-2
+           :paint-render-target-2 render-target-1)))
 
 (defn event-loop []
   (let [pen-event-channel (async/chan)
@@ -223,7 +306,8 @@
                                    (texture/create-for-file "pumpkin.png" gl))}]
         (let [pen-states #_(async/<!! pen-state-channel) (csp/drain pen-state-channel nil)]
           (if pen-states
-            (let [gpu-state (render-pen-state gpu-state window (last pen-states))] 
+            (let [gpu-state (window/with-gl window gl
+                              (render-pen-state gpu-state gl (last pen-states)))]
               (window/swap-buffers window)
               (recur gpu-state)))))
 
@@ -260,3 +344,8 @@
           (.setVisible true)))))
 
 
+(def omat 160000)
+
+(def hinta 400000)
+
+(- hinta omat)
